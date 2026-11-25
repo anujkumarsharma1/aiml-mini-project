@@ -67,6 +67,8 @@ An end-to-end, beginner-friendly Machine Learning and Streamlit web application 
 
 ## 🤖 4. Model Development & Comparison
 
+> **Note:** sections 4 to 6 describe the *original* results (before the changes listed in **Improvements (Anuj)** below). The numbers are reproduced by `train_model.py` as the "before" result.
+
 Two distinct classification paradigms were trained using identical training data and evaluated on the same 656-sample held-out test set:
 
 ### Model A: Logistic Regression (Baseline)
@@ -129,6 +131,72 @@ Actual 1 (FN/TP)    179            77
 - **False Positives (FP):** 43 non-potable samples incorrectly classified as potable.
 - **False Negatives (FN):** 179 potable samples misclassified as non-potable.
 - **True Positives (TP):** 77 potable samples correctly identified.
+
+---
+
+## ✨ Improvements (Anuj)
+
+This section documents the changes added in the `anuj-improvements` branch. All numbers below were produced by running `python train_model.py` (same 80/20 stratified split, `random_state=42`) and are stored in `model_results.json`. The test set has 656 samples.
+
+### Change 1: Imbalance-aware training and honest retuning (Syllabus: Unit III evaluation, Unit V tuning and cross-validation)
+
+**Problem found:** the dataset is 61% non-potable. The original Logistic Regression only predicted the majority class (accuracy 60.98%, F1 0.00), and the "optimized" Random Forest found only 30% of the potable samples. It was also tuned for *accuracy*, which rewards guessing the majority class.
+
+**What changed:**
+- `class_weight='balanced'` for every model that supports it (Logistic Regression, Decision Tree, SVM, Random Forest).
+- `GridSearchCV(scoring='f1')` with `StratifiedKFold(n_splits=5, shuffle=True)`, run on the training data only.
+- ROC-AUC added next to accuracy, precision, recall, F1 and the confusion matrix.
+- The original models are still trained in `train_model.py` so that the before/after comparison is reproducible.
+
+**Before (original approach):**
+
+| Model | Accuracy | Precision | Recall | F1 | ROC-AUC |
+|---|---|---|---|---|---|
+| Logistic Regression (Original) | 60.98% | 0.0000 | 0.0000 | 0.0000 | 0.5481 |
+| Random Forest (Default) | 66.31% | 0.6446 | 0.3047 | 0.4138 | 0.6411 |
+| Random Forest (Tuned for Accuracy) | 66.16% | 0.6417 | 0.3008 | 0.4096 | 0.6491 |
+
+**Random Forest, before vs after:**
+
+| | Accuracy | Precision | Recall | F1 | ROC-AUC | Confusion matrix `[[TN, FP], [FN, TP]]` |
+|---|---|---|---|---|---|---|
+| Before (accuracy-tuned) | 66.16% | 0.6417 | 0.3008 | 0.4096 | 0.6491 | `[[357, 43], [179, 77]]` |
+| After (balanced, F1-tuned) | 63.72% | 0.5425 | 0.4492 | 0.4915 | 0.6630 | `[[303, 97], [141, 115]]` |
+
+**Reading the result honestly:** potable recall rises from 0.30 to 0.45 and F1 from 0.41 to 0.49, but accuracy falls from 66.2% to 63.7% because the model now labels more samples as potable. This is the normal precision/recall trade-off, not a free win.
+
+### Change 2: Syllabus model bake-off (Syllabus: Unit III classification, Unit V SVM / ensembles / AdaBoost)
+
+Seven classifiers use the same pipeline (median imputation, scaling, model), the same split and the same tuning method. Results are sorted by cross-validation F1 on the training data:
+
+| Model | CV F1 (train) | Accuracy | Precision | Recall | F1 | ROC-AUC | class_weight | Best parameters |
+|---|---|---|---|---|---|---|---|---|
+| Support Vector Machine (RBF) | 0.5704 | 62.20% | 0.5159 | 0.5078 | 0.5118 | 0.6440 | balanced | C=1, gamma=scale |
+| Random Forest | 0.5491 | 63.72% | 0.5425 | 0.4492 | 0.4915 | 0.6630 | balanced | max_depth=None, min_samples_split=10, n_estimators=200 |
+| Decision Tree | 0.5348 | 60.06% | 0.4901 | 0.5820 | 0.5321 | 0.6297 | balanced | max_depth=None, min_samples_leaf=10 |
+| K-Nearest Neighbors | 0.4644 | 60.82% | 0.4974 | 0.3750 | 0.4276 | 0.5811 | not supported | n_neighbors=3 |
+| Logistic Regression | 0.4179 | 53.05% | 0.4217 | 0.5469 | 0.4762 | 0.5488 | balanced | C=0.01 |
+| Naive Bayes (Gaussian) | 0.3379 | 61.43% | 0.5161 | 0.1875 | 0.2751 | 0.6090 | not supported | var_smoothing=1e-09 |
+| AdaBoost | 0.1989 | 62.04% | 0.6061 | 0.0781 | 0.1384 | 0.5863 | not supported | learning_rate=1.0, n_estimators=200 |
+
+- **Saved model:** Support Vector Machine (RBF) (Balanced, F1-tuned), chosen by the highest cross-validation F1 (0.5704) on the *training* data, so the test set was not used for model selection. It is stored in `water_model.joblib`.
+- The top models are close to each other. The best test F1 is Decision Tree (0.5321) and the best test ROC-AUC is Random Forest (0.6630); no model is clearly better on this dataset.
+- KNN, Naive Bayes and AdaBoost do not have a `class_weight` option, and they have the lowest recall. AdaBoost in particular finds only 8% of potable samples.
+- Feature importance now uses permutation importance on the test set (works for any model, including the SVM).
+- The **Model Performance & Comparison** tab shows the comparison table, F1 / ROC-AUC charts and all seven confusion matrices.
+
+### Change 3: Unsupervised Analysis tab (Syllabus: Unit IV PCA, K-Means, hierarchical clustering, cluster evaluation)
+
+A new **Unsupervised Analysis** page in the app. The labels are not used to build the clusters; they are only used afterwards for comparison.
+- **PCA:** 2-D scatter coloured by potability and an explained-variance chart. The first two components explain only 26.0% of the variance and 8 of 9 components are needed for 90%; the two classes overlap almost completely.
+- **K-Means:** elbow curve and silhouette score for k = 2 to 10. The silhouette score is low (best 0.082 at k = 2) and the elbow curve has no sharp bend. For k = 2 the cluster purity is 61.0%, which equals the majority-class share, and the Adjusted Rand Index is about 0.000.
+- **Hierarchical clustering:** Ward dendrogram on a random sample (30 to 150 rows, default 60), with potable / non-potable leaves coloured, and cluster-vs-label agreement for a 2-cluster cut. On small samples this result is unstable, which the page points out.
+- **Conclusion:** the features show no natural potable / non-potable grouping, which is consistent with the modest supervised scores.
+
+### Other fixes
+- Sidebar model name, feature-importance caption and the Academic Report tab text now read from `model_results.json`, so they cannot drift from the real results.
+- The Dataset Analysis insight no longer says non-linear models are "necessary"; no model exceeds about 0.66 ROC-AUC.
+- `scipy` added to `requirements.txt` (dendrogram).
 
 ---
 
@@ -225,9 +293,9 @@ Use this script to deliver an outstanding college presentation:
 - **Minute 1:30 – 3:00 (Dataset & Preprocessing):**  
   *"We used a genuine dataset of 3,276 water samples. We handled missing values in Sulfate and pH using median imputation to prevent outlier distortion, and fitted our pipeline only on the 80% training split to eliminate data leakage."*
 - **Minute 3:00 – 5:00 (Algorithm Comparison & Key Discovery):**  
-  *"We compared Logistic Regression and Random Forest. We discovered that water potability is non-linear—Logistic Regression failed with 0% recall by guessing the majority class, while Random Forest achieved 66.16% test accuracy and balanced multi-class performance."*
+  *"We compared seven syllabus classifiers. Our original Logistic Regression scored 61% accuracy only by predicting non-potable every time, so we judged models by F1-score and ROC-AUC, not accuracy alone."*
 - **Minute 5:00 – 6:30 (Optimization & Feature Importance):**  
-  *"We tuned Random Forest using 5-fold cross-validation. Sulfate and pH were identified as the strongest predictive indicators."*
+  *"We used class weights and GridSearchCV with stratified 5-fold cross-validation scored on F1. The SVM had the best cross-validation F1. PCA and K-Means show the two classes overlap heavily, which explains the modest scores."*
 - **Minute 6:30 – 8:30 (Live System Demonstration):**  
   *Open the Predictor tab. Click 'Load Known Potable Sample' -> Predict. Then click 'Load Known Non-Potable Sample' -> Predict. Point out the probability gauge, model badge, and academic disclaimer.*
 - **Minute 8:30 – 10:00 (Conclusion & Viva Defense):**  

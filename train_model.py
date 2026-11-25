@@ -2,20 +2,28 @@
 AquaGuard AI – Water Quality Classification System
 Model Training, Preprocessing, Evaluation, and Optimization Pipeline
 
-Author: AquaGuard AI Team
-Description: Trains Logistic Regression and Random Forest models on the genuine
-Water Potability dataset, performs hyperparameter optimization using GridSearchCV,
-evaluates both models on held-out test data, and saves the trained model pipeline
-and evaluation results.
+Description:
+  1. Loads the Water Potability dataset and splits it 80/20 (stratified).
+  2. Trains the ORIGINAL models (no class weights, tuned for accuracy) so we have a "before" result.
+  3. Trains 7 IMPROVED models (Logistic Regression, Decision Tree, KNN, Naive Bayes, SVM,
+     Random Forest, AdaBoost): class_weight='balanced' (where supported) and
+     GridSearchCV that optimises F1-score with stratified 5-fold cross-validation.
+  4. Picks the best model by cross-validation F1 (training data only, never the test set).
+  5. Saves the chosen pipeline to water_model.joblib and all metrics to model_results.json.
+
+Run:  python train_model.py
 """
 
 import json
 import os
+import warnings
+
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -23,184 +31,226 @@ from sklearn.metrics import (
     f1_score,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+
+warnings.filterwarnings("ignore")
+
+RANDOM_STATE = 42
+TARGET_COL = "Potability"
+
+# Models compared in the "bake-off" (all syllabus classifiers, same split and same pipeline).
+# Each entry: display name, estimator, hyperparameter grid, supports class_weight?
+# KNN, Naive Bayes and AdaBoost have no class_weight option in scikit-learn.
+MODEL_CONFIGS = {
+    "logistic_regression": (
+        "Logistic Regression",
+        LogisticRegression(max_iter=1000, class_weight="balanced", random_state=RANDOM_STATE),
+        {"model__C": [0.01, 0.1, 1, 10]},
+        True,
+    ),
+    "decision_tree": (
+        "Decision Tree",
+        DecisionTreeClassifier(class_weight="balanced", random_state=RANDOM_STATE),
+        {"model__max_depth": [3, 5, 8, None], "model__min_samples_leaf": [1, 5, 10]},
+        True,
+    ),
+    "knn": (
+        "K-Nearest Neighbors",
+        KNeighborsClassifier(),
+        {"model__n_neighbors": [3, 5, 9, 15, 25]},
+        False,
+    ),
+    "naive_bayes": (
+        "Naive Bayes (Gaussian)",
+        GaussianNB(),
+        {"model__var_smoothing": [1e-9, 1e-7, 1e-5]},
+        False,
+    ),
+    "svm": (
+        "Support Vector Machine (RBF)",
+        SVC(class_weight="balanced", probability=True, random_state=RANDOM_STATE),
+        {"model__C": [0.5, 1, 5, 10], "model__gamma": ["scale", 0.05, 0.1]},
+        True,
+    ),
+    "random_forest": (
+        "Random Forest",
+        RandomForestClassifier(class_weight="balanced", random_state=RANDOM_STATE),
+        {
+            "model__n_estimators": [100, 200],
+            "model__max_depth": [None, 10, 20],
+            "model__min_samples_split": [2, 5, 10],
+        },
+        True,
+    ),
+    "adaboost": (
+        "AdaBoost",
+        AdaBoostClassifier(random_state=RANDOM_STATE),
+        {"model__n_estimators": [50, 100, 200], "model__learning_rate": [0.1, 0.5, 1.0]},
+        False,
+    ),
+}
+
+
+def make_pipeline(model):
+    """Preprocessing + model in one Pipeline, so the imputer/scaler are fitted on training data only."""
+    return Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+        ("model", model),
+    ])
+
+
+def evaluate(pipeline, X_test, y_test):
+    """Return accuracy, precision, recall, F1, ROC-AUC and confusion matrix on the test set."""
+    pred = pipeline.predict(X_test)
+    prob = pipeline.predict_proba(X_test)[:, 1]
+    return {
+        "accuracy": float(accuracy_score(y_test, pred)),
+        "precision": float(precision_score(y_test, pred, zero_division=0)),
+        "recall": float(recall_score(y_test, pred, zero_division=0)),
+        "f1_score": float(f1_score(y_test, pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(y_test, prob)),
+        "confusion_matrix": confusion_matrix(y_test, pred).tolist(),
+    }
+
+
+def clean_params(params):
+    """Make GridSearch params JSON friendly (drop 'model__' prefix, None -> 'None')."""
+    return {k.replace("model__", ""): ("None" if v is None else v) for k, v in params.items()}
+
+
+def print_metrics(label, m):
+    print(
+        f"      {label:<34} Acc={m['accuracy']:.4f}  Prec={m['precision']:.4f}  "
+        f"Rec={m['recall']:.4f}  F1={m['f1_score']:.4f}  AUC={m['roc_auc']:.4f}"
+    )
 
 
 def main():
-    print("=" * 60)
+    print("=" * 70)
     print(" AquaGuard AI – Model Training and Optimization Pipeline")
-    print("=" * 60)
+    print("=" * 70)
 
-    # 1. Dataset Collection & Inspection
+    # ---------------------------------------------------------------- 1. Data
     dataset_path = "water_potability.csv"
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(
             f"Dataset not found at {dataset_path}. Please place water_potability.csv in the project folder."
         )
 
-    print(f"\n[1/6] Loading genuine dataset: {dataset_path}...")
+    print(f"\n[1/6] Loading dataset: {dataset_path}...")
     df = pd.read_csv(dataset_path)
     total_records, total_columns = df.shape
-    print(f"      Total records : {total_records}")
-    print(f"      Total columns : {total_columns}")
+    if TARGET_COL not in df.columns:
+        raise ValueError(f"Target column '{TARGET_COL}' not found in dataset.")
 
-    # Check target and features
-    target_col = "Potability"
-    if target_col not in df.columns:
-        raise ValueError(f"Target column '{target_col}' not found in dataset.")
-
-    feature_cols = [c for c in df.columns if c != target_col]
-    print(f"      Input features: {len(feature_cols)} -> {feature_cols}")
-
-    # Missing values and duplicates
+    feature_cols = [c for c in df.columns if c != TARGET_COL]
     missing_dict = df[feature_cols].isnull().sum().to_dict()
     duplicates_count = int(df.duplicated().sum())
-    class_counts = df[target_col].value_counts().to_dict()
-
-    print(f"      Duplicate records: {duplicates_count}")
+    class_counts = df[TARGET_COL].value_counts().to_dict()
+    print(f"      Records: {total_records}, features: {len(feature_cols)}, duplicates: {duplicates_count}")
     print(f"      Missing values: {missing_dict}")
-    print(f"      Target distribution: Non-potable (0)={class_counts.get(0, 0)}, Potable (1)={class_counts.get(1, 0)}")
+    print(f"      Target: Non-potable (0)={class_counts.get(0, 0)}, Potable (1)={class_counts.get(1, 0)}")
 
-    # Calculate feature summary stats for UI validation / presets
-    feature_stats = {}
-    for col in feature_cols:
-        feature_stats[col] = {
+    # Feature summary stats (used by the UI for default input values)
+    feature_stats = {
+        col: {
             "mean": float(df[col].mean()),
             "std": float(df[col].std()),
             "median": float(df[col].median()),
             "min": float(df[col].min()),
             "max": float(df[col].max()),
         }
-
-    # Extract sample potable and non-potable records (clean rows with no NaNs) for presentation presets
-    clean_potable = df[df[target_col] == 1].dropna().head(1)
-    clean_non_potable = df[df[target_col] == 0].dropna().head(1)
-    sample_potable = clean_potable[feature_cols].iloc[0].to_dict()
-    sample_non_potable = clean_non_potable[feature_cols].iloc[0].to_dict()
-
-    # 2. Data Preprocessing & Stratified Train/Test Split
-    print("\n[2/6] Preprocessing and splitting dataset (80% train, 20% test)...")
-    X = df[feature_cols]
-    y = df[target_col]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=42, stratify=y
-    )
-    print(f"      Training samples : {len(X_train)} (80%)")
-    print(f"      Testing samples  : {len(X_test)} (20%)")
-    print("      Preprocessing pipeline: SimpleImputer(median) + StandardScaler()")
-    print("      Note: Preprocessor is fitted strictly on X_train to prevent data leakage.")
-
-    # 3. Model A: Logistic Regression Baseline
-    print("\n[3/6] Training Model A: Logistic Regression (Baseline)...")
-    lr_pipeline = Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler()),
-        ("model", LogisticRegression(max_iter=1000, random_state=42)),
-    ])
-    lr_pipeline.fit(X_train, y_train)
-    lr_pred = lr_pipeline.predict(X_test)
-
-    lr_acc = float(accuracy_score(y_test, lr_pred))
-    lr_prec = float(precision_score(y_test, lr_pred, zero_division=0))
-    lr_rec = float(recall_score(y_test, lr_pred, zero_division=0))
-    lr_f1 = float(f1_score(y_test, lr_pred, zero_division=0))
-    lr_cm = confusion_matrix(y_test, lr_pred).tolist()
-
-    print(f"      Logistic Regression Test Accuracy : {lr_acc:.4f} ({lr_acc*100:.2f}%)")
-    print(f"      Logistic Regression Test Precision: {lr_prec:.4f}")
-    print(f"      Logistic Regression Test Recall   : {lr_rec:.4f}")
-    print(f"      Logistic Regression Test F1 Score : {lr_f1:.4f}")
-    print(f"      Logistic Regression Confusion Matrix: {lr_cm}")
-
-    # 4. Model B: Random Forest Classifier Baseline
-    print("\n[4/6] Training Model B: Random Forest Classifier (Baseline)...")
-    rf_baseline_pipeline = Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler()),
-        ("model", RandomForestClassifier(random_state=42)),
-    ])
-    rf_baseline_pipeline.fit(X_train, y_train)
-    rf_base_pred = rf_baseline_pipeline.predict(X_test)
-
-    rf_base_acc = float(accuracy_score(y_test, rf_base_pred))
-    rf_base_prec = float(precision_score(y_test, rf_base_pred, zero_division=0))
-    rf_base_rec = float(recall_score(y_test, rf_base_pred, zero_division=0))
-    rf_base_f1 = float(f1_score(y_test, rf_base_pred, zero_division=0))
-    rf_base_cm = confusion_matrix(y_test, rf_base_pred).tolist()
-
-    print(f"      Random Forest Baseline Test Accuracy : {rf_base_acc:.4f} ({rf_base_acc*100:.2f}%)")
-    print(f"      Random Forest Baseline Test Precision: {rf_base_prec:.4f}")
-    print(f"      Random Forest Baseline Test Recall   : {rf_base_rec:.4f}")
-    print(f"      Random Forest Baseline Test F1 Score : {rf_base_f1:.4f}")
-    print(f"      Random Forest Baseline Confusion Matrix: {rf_base_cm}")
-
-    # 5. Model Optimization: Hyperparameter Tuning with GridSearchCV
-    print("\n[5/6] Performing Hyperparameter Tuning for Random Forest (GridSearchCV)...")
-    param_grid = {
-        "model__n_estimators": [100, 200],
-        "model__max_depth": [None, 10, 20],
-        "model__min_samples_split": [2, 5, 10],
+        for col in feature_cols
     }
 
-    grid_search = GridSearchCV(
-        rf_baseline_pipeline,
-        param_grid=param_grid,
+    # Clean example rows for the live-demo preset buttons
+    sample_potable = df[df[TARGET_COL] == 1].dropna().head(1)[feature_cols].iloc[0].to_dict()
+    sample_non_potable = df[df[TARGET_COL] == 0].dropna().head(1)[feature_cols].iloc[0].to_dict()
+
+    # ------------------------------------------------------------- 2. Split
+    print("\n[2/6] Stratified split (80% train, 20% test)...")
+    X = df[feature_cols]
+    y = df[TARGET_COL]
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=RANDOM_STATE, stratify=y
+    )
+    print(f"      Train: {len(X_train)}  Test: {len(X_test)}")
+
+    # ------------------------------------------- 3. BEFORE: original approach
+    print("\n[3/6] BEFORE: original models (no class weights, tuned for accuracy)...")
+    lr_before = make_pipeline(LogisticRegression(max_iter=1000, random_state=RANDOM_STATE))
+    lr_before.fit(X_train, y_train)
+    lr_before_m = evaluate(lr_before, X_test, y_test)
+    print_metrics("Logistic Regression", lr_before_m)
+
+    rf_base = make_pipeline(RandomForestClassifier(random_state=RANDOM_STATE))
+    rf_base.fit(X_train, y_train)
+    rf_base_m = evaluate(rf_base, X_test, y_test)
+    print_metrics("Random Forest (default)", rf_base_m)
+
+    old_grid = GridSearchCV(
+        make_pipeline(RandomForestClassifier(random_state=RANDOM_STATE)),
+        param_grid=MODEL_CONFIGS["random_forest"][2],
         cv=5,
         scoring="accuracy",
         n_jobs=-1,
-        verbose=1,
     )
-    grid_search.fit(X_train, y_train)
+    old_grid.fit(X_train, y_train)
+    rf_before_m = evaluate(old_grid.best_estimator_, X_test, y_test)
+    rf_before_m["best_parameters"] = clean_params(old_grid.best_params_)
+    rf_before_m["best_cv_accuracy"] = float(old_grid.best_score_)
+    print_metrics("Random Forest (tuned for accuracy)", rf_before_m)
 
-    best_rf_pipeline = grid_search.best_estimator_
-    best_params = {
-        k.replace("model__", ""): (v if v is not None else "None")
-        for k, v in grid_search.best_params_.items()
-    }
-    best_cv_score = float(grid_search.best_score_)
+    # --------------------------------------- 4. AFTER: imbalance-aware tuning
+    print("\n[4/6] AFTER / BAKE-OFF: class_weight='balanced' + GridSearchCV(scoring=F1, StratifiedKFold)...")
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    improved = {}
+    fitted = {}
+    for key, (name, estimator, grid, has_class_weight) in MODEL_CONFIGS.items():
+        search = GridSearchCV(
+            make_pipeline(estimator), param_grid=grid, cv=cv, scoring="f1", n_jobs=-1
+        )
+        search.fit(X_train, y_train)
+        metrics = evaluate(search.best_estimator_, X_test, y_test)
+        metrics.update({
+            "name": name,
+            "class_weight": "balanced" if has_class_weight else "not supported",
+            "best_parameters": clean_params(search.best_params_),
+            "cv_f1": float(search.best_score_),
+        })
+        improved[key] = metrics
+        fitted[key] = search.best_estimator_
+        print_metrics(f"{name} (cv F1={search.best_score_:.3f})", metrics)
 
-    rf_opt_pred = best_rf_pipeline.predict(X_test)
-    rf_opt_acc = float(accuracy_score(y_test, rf_opt_pred))
-    rf_opt_prec = float(precision_score(y_test, rf_opt_pred, zero_division=0))
-    rf_opt_rec = float(recall_score(y_test, rf_opt_pred, zero_division=0))
-    rf_opt_f1 = float(f1_score(y_test, rf_opt_pred, zero_division=0))
-    rf_opt_cm = confusion_matrix(y_test, rf_opt_pred).tolist()
+    # ----------------------------------------------- 5. Select the best model
+    print("\n[5/6] Selecting the best model by cross-validation F1 (training data only)...")
+    best_key = max(improved, key=lambda k: improved[k]["cv_f1"])
+    best_name = improved[best_key]["name"]
+    best_pipeline = fitted[best_key]
+    print(f"      Selected: {best_name} (CV F1 = {improved[best_key]['cv_f1']:.4f})")
 
-    print(f"      Best Hyperparameters: {best_params}")
-    print(f"      Best 5-Fold CV Accuracy: {best_cv_score:.4f} ({best_cv_score*100:.2f}%)")
-    print(f"      Optimized RF Test Accuracy : {rf_opt_acc:.4f} ({rf_opt_acc*100:.2f}%)")
-    print(f"      Optimized RF Test Precision: {rf_opt_prec:.4f}")
-    print(f"      Optimized RF Test Recall   : {rf_opt_rec:.4f}")
-    print(f"      Optimized RF Test F1 Score : {rf_opt_f1:.4f}")
-    print(f"      Optimized RF Confusion Matrix: {rf_opt_cm}")
-
-    # Extract feature importances from the best model
-    rf_step_model = best_rf_pipeline.named_steps["model"]
-    feature_importances = {
-        feat: float(imp)
-        for feat, imp in zip(feature_cols, rf_step_model.feature_importances_)
-    }
-    # Sort by importance descending
-    feature_importances = dict(
-        sorted(feature_importances.items(), key=lambda item: item[1], reverse=True)
+    # Permutation importance works for any model: how much F1 drops when a feature is shuffled
+    perm = permutation_importance(
+        best_pipeline, X_test, y_test, scoring="f1", n_repeats=10, random_state=RANDOM_STATE
     )
+    importances = dict(sorted(
+        zip(feature_cols, perm.importances_mean.astype(float).tolist()),
+        key=lambda item: item[1], reverse=True,
+    ))
 
-    # 6. Model Selection, Saving Artifacts
-    print("\n[6/6] Selecting Best Model and Saving Artifacts...")
-    # Selection criterion: Highest overall F1-score & balanced capability
-    # Random Forest outperforms Logistic Regression substantially on F1-score
-    selected_model_name = "Random Forest Classifier (Optimized)"
-    selected_pipeline = best_rf_pipeline
+    # ------------------------------------------------------------ 6. Save
+    print("\n[6/6] Saving artifacts...")
+    joblib.dump(best_pipeline, "water_model.joblib")
 
-    model_save_path = "water_model.joblib"
-    joblib.dump(selected_pipeline, model_save_path)
-    print(f"      Saved model pipeline to: {model_save_path}")
-
-    # Compile evaluation results into JSON
     results_data = {
         "dataset_info": {
             "filename": "water_potability.csv",
@@ -209,7 +259,7 @@ def main():
             "total_columns": total_columns,
             "feature_count": len(feature_cols),
             "features": feature_cols,
-            "target": target_col,
+            "target": TARGET_COL,
             "missing_values": missing_dict,
             "duplicate_records": duplicates_count,
             "class_distribution": {
@@ -225,57 +275,50 @@ def main():
             "potable_sample": sample_potable,
             "non_potable_sample": sample_non_potable,
         },
+        # BEFORE: the original approach (kept so the app can show before vs after)
         "models": {
             "logistic_regression": {
-                "name": "Logistic Regression (Baseline)",
-                "description": "Linear classifier serving as an interpretable baseline.",
-                "accuracy": lr_acc,
-                "precision": lr_prec,
-                "recall": lr_rec,
-                "f1_score": lr_f1,
-                "confusion_matrix": lr_cm,
+                "name": "Logistic Regression (Original)",
+                "description": "Linear classifier, no class weights.",
+                **lr_before_m,
             },
             "random_forest_baseline": {
-                "name": "Random Forest Classifier (Baseline)",
-                "description": "Ensemble of 100 decision trees with default parameters.",
-                "accuracy": rf_base_acc,
-                "precision": rf_base_prec,
-                "recall": rf_base_rec,
-                "f1_score": rf_base_f1,
-                "confusion_matrix": rf_base_cm,
+                "name": "Random Forest (Default)",
+                "description": "100 trees with default parameters, no class weights.",
+                **rf_base_m,
             },
             "random_forest_optimized": {
-                "name": "Random Forest Classifier (Optimized)",
-                "description": "Tuned ensemble evaluated with 5-fold cross-validation on training data.",
-                "accuracy": rf_opt_acc,
-                "precision": rf_opt_prec,
-                "recall": rf_opt_rec,
-                "f1_score": rf_opt_f1,
-                "confusion_matrix": rf_opt_cm,
-                "best_parameters": best_params,
-                "best_cv_accuracy": best_cv_score,
+                "name": "Random Forest (Tuned for Accuracy)",
+                "description": "Original GridSearchCV tuned for accuracy, no class weights.",
+                **rf_before_m,
             },
         },
+        # AFTER: imbalance-aware models, tuned for F1 with stratified CV
+        "tuning": {
+            "scoring": "f1",
+            "cv": "StratifiedKFold(n_splits=5, shuffle=True, random_state=42)",
+            "class_weight": "balanced (where the algorithm supports it)",
+        },
+        "improved_models": improved,
         "selected_model": {
-            "name": selected_model_name,
+            "key": best_key,
+            "name": f"{best_name} (Balanced, F1-tuned)",
             "selection_criterion": (
-                "Selected based on test F1-score and multi-class capability. Logistic Regression "
-                "achieved 60.98% accuracy by predicting only the majority non-potable class (F1=0.00), "
-                "while Random Forest effectively captured complex non-linear chemical relationships with "
-                "a test accuracy of 66.16% and F1-score of 0.4096 (CV accuracy 67.29%)."
+                "Highest 5-fold stratified cross-validation F1-score on the training data "
+                f"(CV F1 = {improved[best_key]['cv_f1']:.4f}). The test set was not used to choose the model."
             ),
-            "feature_importances": feature_importances,
+            "importance_method": "Permutation importance on the test set (mean drop in F1 when a feature is shuffled)",
+            "feature_importances": importances,
         },
     }
 
-    results_save_path = "model_results.json"
-    with open(results_save_path, "w") as f:
+    with open("model_results.json", "w") as f:
         json.dump(results_data, f, indent=4)
-    print(f"      Saved evaluation results to: {results_save_path}")
+    print("      Saved: water_model.joblib, model_results.json")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print(" Training, evaluation, and artifact generation complete!")
-    print("=" * 60)
+    print("=" * 70)
 
 
 if __name__ == "__main__":

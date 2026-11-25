@@ -46,9 +46,9 @@
             "max": 13.999999999999998
         },
         "Hardness": {
-            "mean": 196.36949601730151,
+            "mean": 196.36949601730154,
             "std": 32.879761476294156,
-            "median": 196.96762686363076,
+            "median": 196.96762686363073,
             "min": 47.432,
             "max": 323.124
         },
@@ -67,16 +67,16 @@
             "max": 13.127000000000002
         },
         "Sulfate": {
-            "mean": 333.7757766108135,
+            "mean": 333.77577661081347,
             "std": 41.416840461672706,
             "median": 333.073545745888,
             "min": 129.00000000000003,
-            "max": 481.0306423059972
+            "max": 481.03064230599716
         },
         "Conductivity": {
             "mean": 426.20511068255325,
             "std": 80.8240640511118,
-            "median": 421.8849682800544,
+            "median": 421.88496828005435,
             "min": 181.483753985146,
             "max": 753.3426195583046
         },
@@ -97,7 +97,7 @@
         "Turbidity": {
             "mean": 3.966786169791058,
             "std": 0.7803824084854124,
-            "median": 3.955027562993039,
+            "median": 3.9550275629930396,
             "min": 1.45,
             "max": 6.739
         }
@@ -112,28 +112,29 @@
             "Conductivity": 592.6590209759507,
             "Organic_carbon": 8.606396746986945,
             "Trihalomethanes": 77.57745951035697,
-            "Turbidity": 3.8751652466165463
+            "Turbidity": 3.8751652466165467
         },
         "non_potable_sample": {
             "ph": 8.316765884214679,
-            "Hardness": 214.3733940856225,
-            "Solids": 22018.41744077529,
+            "Hardness": 214.37339408562252,
+            "Solids": 22018.417440775294,
             "Chloramines": 8.05933237743854,
             "Sulfate": 356.88613564305666,
             "Conductivity": 363.2665161642437,
-            "Organic_carbon": 18.436524495493305,
+            "Organic_carbon": 18.436524495493302,
             "Trihalomethanes": 100.34167436508008,
             "Turbidity": 4.628770536837084
         }
     },
     "models": {
         "logistic_regression": {
-            "name": "Logistic Regression (Baseline)",
-            "description": "Linear classifier serving as an interpretable baseline.",
+            "name": "Logistic Regression (Original)",
+            "description": "Linear classifier, no class weights.",
             "accuracy": 0.6097560975609756,
             "precision": 0.0,
             "recall": 0.0,
             "f1_score": 0.0,
+            "roc_auc": 0.548115234375,
             "confusion_matrix": [
                 [
                     400,
@@ -146,12 +147,13 @@
             ]
         },
         "random_forest_baseline": {
-            "name": "Random Forest Classifier (Baseline)",
-            "description": "Ensemble of 100 decision trees with default parameters.",
+            "name": "Random Forest (Default)",
+            "description": "100 trees with default parameters, no class weights.",
             "accuracy": 0.663109756097561,
             "precision": 0.6446280991735537,
             "recall": 0.3046875,
             "f1_score": 0.41379310344827586,
+            "roc_auc": 0.6411474609375,
             "confusion_matrix": [
                 [
                     357,
@@ -164,12 +166,13 @@
             ]
         },
         "random_forest_optimized": {
-            "name": "Random Forest Classifier (Optimized)",
-            "description": "Tuned ensemble evaluated with 5-fold cross-validation on training data.",
+            "name": "Random Forest (Tuned for Accuracy)",
+            "description": "Original GridSearchCV tuned for accuracy, no class weights.",
             "accuracy": 0.6615853658536586,
             "precision": 0.6416666666666667,
             "recall": 0.30078125,
             "f1_score": 0.4095744680851064,
+            "roc_auc": 0.649130859375,
             "confusion_matrix": [
                 [
                     357,
@@ -188,19 +191,194 @@
             "best_cv_accuracy": 0.6729007633587786
         }
     },
+    "tuning": {
+        "scoring": "f1",
+        "cv": "StratifiedKFold(n_splits=5, shuffle=True, random_state=42)",
+        "class_weight": "balanced (where the algorithm supports it)"
+    },
+    "improved_models": {
+        "logistic_regression": {
+            "accuracy": 0.5304878048780488,
+            "precision": 0.42168674698795183,
+            "recall": 0.546875,
+            "f1_score": 0.47619047619047616,
+            "roc_auc": 0.5487890624999999,
+            "confusion_matrix": [
+                [
+                    208,
+                    192
+                ],
+                [
+                    116,
+                    140
+                ]
+            ],
+            "name": "Logistic Regression",
+            "class_weight": "balanced",
+            "best_parameters": {
+                "C": 0.01
+            },
+            "cv_f1": 0.4179106420640091
+        },
+        "decision_tree": {
+            "accuracy": 0.600609756097561,
+            "precision": 0.4901315789473684,
+            "recall": 0.58203125,
+            "f1_score": 0.5321428571428571,
+            "roc_auc": 0.6297460937499999,
+            "confusion_matrix": [
+                [
+                    245,
+                    155
+                ],
+                [
+                    107,
+                    149
+                ]
+            ],
+            "name": "Decision Tree",
+            "class_weight": "balanced",
+            "best_parameters": {
+                "max_depth": "None",
+                "min_samples_leaf": 10
+            },
+            "cv_f1": 0.5348184433829051
+        },
+        "knn": {
+            "accuracy": 0.6082317073170732,
+            "precision": 0.49740932642487046,
+            "recall": 0.375,
+            "f1_score": 0.42761692650334077,
+            "roc_auc": 0.5811474609375,
+            "confusion_matrix": [
+                [
+                    303,
+                    97
+                ],
+                [
+                    160,
+                    96
+                ]
+            ],
+            "name": "K-Nearest Neighbors",
+            "class_weight": "not supported",
+            "best_parameters": {
+                "n_neighbors": 3
+            },
+            "cv_f1": 0.46435157739224986
+        },
+        "naive_bayes": {
+            "accuracy": 0.614329268292683,
+            "precision": 0.5161290322580645,
+            "recall": 0.1875,
+            "f1_score": 0.27507163323782235,
+            "roc_auc": 0.609033203125,
+            "confusion_matrix": [
+                [
+                    355,
+                    45
+                ],
+                [
+                    208,
+                    48
+                ]
+            ],
+            "name": "Naive Bayes (Gaussian)",
+            "class_weight": "not supported",
+            "best_parameters": {
+                "var_smoothing": 1e-09
+            },
+            "cv_f1": 0.3379055233681584
+        },
+        "svm": {
+            "accuracy": 0.6219512195121951,
+            "precision": 0.5158730158730159,
+            "recall": 0.5078125,
+            "f1_score": 0.5118110236220472,
+            "roc_auc": 0.6439746093749998,
+            "confusion_matrix": [
+                [
+                    278,
+                    122
+                ],
+                [
+                    126,
+                    130
+                ]
+            ],
+            "name": "Support Vector Machine (RBF)",
+            "class_weight": "balanced",
+            "best_parameters": {
+                "C": 1,
+                "gamma": "scale"
+            },
+            "cv_f1": 0.5703708657701149
+        },
+        "random_forest": {
+            "accuracy": 0.6371951219512195,
+            "precision": 0.5424528301886793,
+            "recall": 0.44921875,
+            "f1_score": 0.49145299145299143,
+            "roc_auc": 0.66296875,
+            "confusion_matrix": [
+                [
+                    303,
+                    97
+                ],
+                [
+                    141,
+                    115
+                ]
+            ],
+            "name": "Random Forest",
+            "class_weight": "balanced",
+            "best_parameters": {
+                "max_depth": "None",
+                "min_samples_split": 10,
+                "n_estimators": 200
+            },
+            "cv_f1": 0.5491186932345087
+        },
+        "adaboost": {
+            "accuracy": 0.6204268292682927,
+            "precision": 0.6060606060606061,
+            "recall": 0.078125,
+            "f1_score": 0.1384083044982699,
+            "roc_auc": 0.586337890625,
+            "confusion_matrix": [
+                [
+                    387,
+                    13
+                ],
+                [
+                    236,
+                    20
+                ]
+            ],
+            "name": "AdaBoost",
+            "class_weight": "not supported",
+            "best_parameters": {
+                "learning_rate": 1.0,
+                "n_estimators": 200
+            },
+            "cv_f1": 0.19894192911477696
+        }
+    },
     "selected_model": {
-        "name": "Random Forest Classifier (Optimized)",
-        "selection_criterion": "Selected based on test F1-score and multi-class capability. Logistic Regression achieved 60.98% accuracy by predicting only the majority non-potable class (F1=0.00), while Random Forest effectively captured complex non-linear chemical relationships with a test accuracy of 66.16% and F1-score of 0.4096 (CV accuracy 67.29%).",
+        "key": "svm",
+        "name": "Support Vector Machine (RBF) (Balanced, F1-tuned)",
+        "selection_criterion": "Highest 5-fold stratified cross-validation F1-score on the training data (CV F1 = 0.5704). The test set was not used to choose the model.",
+        "importance_method": "Permutation importance on the test set (mean drop in F1 when a feature is shuffled)",
         "feature_importances": {
-            "Sulfate": 0.13616644951879972,
-            "ph": 0.13499533592889568,
-            "Hardness": 0.11846028070743211,
-            "Chloramines": 0.11556795490932488,
-            "Solids": 0.11486070268679005,
-            "Conductivity": 0.09704157007188352,
-            "Organic_carbon": 0.09567174809516767,
-            "Turbidity": 0.0937524972222094,
-            "Trihalomethanes": 0.09348346085949692
+            "Sulfate": 0.07621607887815514,
+            "ph": 0.0622423735379712,
+            "Solids": 0.05391646735988154,
+            "Chloramines": 0.027811364834252054,
+            "Hardness": 0.025285843398921044,
+            "Conductivity": 0.00126569909112072,
+            "Organic_carbon": -0.0013665802315937115,
+            "Turbidity": -0.0050215553187054505,
+            "Trihalomethanes": -0.012385160503036351
         }
     }
 }
